@@ -72,9 +72,9 @@ func EndpointsFromActual(actualLRPInfo *endpoint.ActualLRPRoutingInfo) (map[uint
 			endpoint := Endpoint{
 				InstanceGuid:    actual.InstanceGuid,
 				Index:           actual.Index,
-				Host:            actual.Address,
+				Host:            actual.InstanceAddress,
 				Domain:          actual.Domain,
-				Port:            portMapping.HostPort,
+				Port:            portMapping.ContainerPort,
 				ContainerPort:   portMapping.ContainerPort,
 				Evacuating:      actualLRPInfo.Evacuating,
 				ModificationTag: &actual.ModificationTag,
