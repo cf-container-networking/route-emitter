@@ -1,6 +1,8 @@
 package routingtable
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 
 	tcpmodels "code.cloudfoundry.org/routing-api/models"
@@ -46,6 +48,7 @@ type RoutingTable interface {
 }
 
 type routingTable struct {
+	internalEntries     map[string][]Endpoint
 	entries             map[RoutingKey]RoutableEndpoints
 	addressEntries      map[Address]EndpointKey
 	addressGenerator    func(endpoint Endpoint) Address
@@ -66,6 +69,7 @@ func NewRoutingTable(logger lager.Logger, directInstanceRoute bool) RoutingTable
 	}
 
 	return &routingTable{
+		internalEntries:     make(map[string][]Endpoint),
 		entries:             make(map[RoutingKey]RoutableEndpoints),
 		addressEntries:      make(map[Address]EndpointKey),
 		directInstanceRoute: directInstanceRoute,
@@ -104,10 +108,32 @@ func (table *routingTable) AddEndpoint(actualLRP *ActualLRPRoutingInfo) (TCPRout
 		table.addressEntries[address] = endpoint.key()
 	}
 
-	// add endpoints
-
 	var messagesToEmit MessagesToEmit
 	var mappings TCPRouteMappings
+
+	// add internal address
+	endpoint := Endpoint{
+		InstanceGUID:    actualLRP.ActualLRP.InstanceGuid,
+		Index:           actualLRP.ActualLRP.Index,
+		Host:            actualLRP.ActualLRP.Address,
+		ContainerIP:     actualLRP.ActualLRP.InstanceAddress,
+		Evacuating:      actualLRP.Evacuating,
+		ModificationTag: &actualLRP.ActualLRP.ModificationTag,
+	}
+	table.internalEntries[actualLRP.ActualLRP.ProcessGuid] = append(table.internalEntries[actualLRP.ActualLRP.ProcessGuid],
+		endpoint)
+
+	// in future, add network section to schedulinginfo
+	appGuid := strings.Join(strings.Split(actualLRP.ActualLRP.ProcessGuid, "-")[:5], "-")
+	message := RegistryMessage{
+		Host: endpoint.ContainerIP,
+		URIs: []string{fmt.Sprintf("%s.some-tld.local", appGuid), fmt.Sprintf("%d.%s.some-tld.local", endpoint.Index, appGuid)},
+	}
+	messagesToEmit = messagesToEmit.Merge(MessagesToEmit{
+		RegistrationMessages: []RegistryMessage{message},
+	})
+
+	// add endpoints
 
 	for _, routingEndpoint := range endpoints {
 		key := RoutingKey{
@@ -162,9 +188,31 @@ func (table *routingTable) RemoveEndpoint(actualLRP *ActualLRPRoutingInfo) (TCPR
 		delete(table.addressEntries, address)
 	}
 
-	// remove endpoint
 	var messagesToEmit MessagesToEmit
 	var mappings TCPRouteMappings
+
+	// remove internal endpoint
+	internalEndpoints := table.internalEntries[actualLRP.ActualLRP.ProcessGuid]
+	for i, internalEndpoint := range internalEndpoints {
+		if internalEndpoint.InstanceGUID == actualLRP.ActualLRP.InstanceGuid {
+			table.internalEntries[actualLRP.ActualLRP.ProcessGuid] = append(internalEndpoints[:i], internalEndpoints[i+1:]...)
+
+			appGuid := strings.Join(strings.Split(actualLRP.ActualLRP.ProcessGuid, "-")[:5], "-")
+			message := RegistryMessage{
+				Host: internalEndpoint.ContainerIP,
+				URIs: []string{
+					fmt.Sprintf("%s.some-tld.local", appGuid),
+					fmt.Sprintf("%d.%s.some-tld.local", internalEndpoint.Index, appGuid),
+				},
+			}
+			messagesToEmit = messagesToEmit.Merge(MessagesToEmit{
+				UnregistrationMessages: []RegistryMessage{message},
+			})
+			break
+		}
+	}
+
+	// remove endpoint
 	for _, routingEndpoint := range endpoints {
 		key := RoutingKey{
 			ProcessGUID:   actualLRP.ActualLRP.ProcessGuid,
