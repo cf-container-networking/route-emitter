@@ -2,6 +2,7 @@ package routehandlers
 
 import (
 	"errors"
+	"time"
 
 	"code.cloudfoundry.org/bbs/models"
 	loggingclient "code.cloudfoundry.org/diego-logging-client"
@@ -133,7 +134,13 @@ func (handler *Handler) Sync(
 	handler.natsEmitter = natsEmitter
 	handler.routingAPIEmitter = routingAPIEmitter
 
+	// start
+	start := time.Now()
 	routeMappings, messages := handler.routingTable.Swap(newTable, domains)
+	swapDuration := time.Now().Sub(start)
+	handler.metronClient.SendDuration("table.swap.time", swapDuration)
+	// emit
+
 	logger.Debug("start-emitting-messages", lager.Data{
 		"num-registration-messages":            len(messages.RegistrationMessages),
 		"num-unregistration-messages":          len(messages.UnregistrationMessages),
