@@ -1305,6 +1305,7 @@ var _ = Describe("RoutingTable", func() {
 					})
 
 					It("emits nothing", func() {
+						// TODO should emit unregistration messages, since we lost endpoints
 						Expect(messagesToEmit).To(BeZero())
 					})
 				})
@@ -1771,19 +1772,17 @@ var _ = Describe("RoutingTable", func() {
 						lrp3 := createActualLRP(key, endpoint3, domain)
 						_, messagesToEmit = table.AddEndpoint(lrp3)
 
-						expected := []routingtable.RegistryMessage{
-							{
-								Host:                 endpoint3.ContainerIP,
-								URIs:                 []string{internalHostname, fmt.Sprintf("%d.%s", 2, internalHostname)},
-								PrivateInstanceIndex: "2",
-								App:                  logGuid,
-								Tags: map[string]string{
-									"component": "route-emitter",
-								},
+						expected := routingtable.RegistryMessage{
+							Host:                 endpoint3.ContainerIP,
+							URIs:                 []string{internalHostname, fmt.Sprintf("%d.%s", 2, internalHostname)},
+							PrivateInstanceIndex: "2",
+							App:                  logGuid,
+							Tags: map[string]string{
+								"component": "route-emitter",
 							},
 						}
 
-						Expect(messagesToEmit.InternalRegistrationMessages).To(Equal(expected))
+						Expect(messagesToEmit.InternalRegistrationMessages).To(ContainElement(expected))
 					})
 
 					Context("when the instance container port changes", func() {

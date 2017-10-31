@@ -1,6 +1,7 @@
 package routingtable
 
 import (
+	"fmt"
 	"sync"
 
 	tcpmodels "code.cloudfoundry.org/routing-api/models"
@@ -292,11 +293,34 @@ func (t *routingTable) Swap(other RoutingTable, domains models.DomainSet) (TCPRo
 		mergedInternalRoutingKeys[key] = struct{}{}
 	}
 	for internalKey := range mergedInternalRoutingKeys {
-		existingInternalEntry := t.internalEntries[internalKey]
+		existingInternalEntry, ok := t.internalEntries[internalKey]
 		newInternalEntry := otherTable.internalEntries[internalKey]
-		_, message := t.emitDiffMessages(internalKey, existingInternalEntry, newInternalEntry)
-		messagesToEmit = messagesToEmit.Merge(message)
+
+		///// Current behavior: Always emit diff from the new entry
+		// _, message := t.emitDiffMessages(internalKey, existingInternalEntry, newInternalEntry)
+		// messagesToEmit = messagesToEmit.Merge(message)
+		/////
+
+		// New behavior:
+		//////////////////////////////
+		if !ok {
+			// routing key exists in only in the new table, emit it
+			_, message := t.emitDiffMessages(internalKey, existingInternalEntry, newInternalEntry)
+			messagesToEmit = messagesToEmit.Merge(message)
+			fmt.Printf(">>>>New Table: %+v\n\n", messagesToEmit)
+		} else {
+			// routing key is either in both tables or in just the old table. Merge the two entries
+			// We always want to merge old routes, so set domains to be empty in line below?
+			merged := mergeUnfreshRoutes(existingInternalEntry, newInternalEntry, models.DomainSet{})
+			otherTable.internalEntries[internalKey] = merged
+			otherTable.deleteInternalEntryIfEmpty(internalKey)
+			_, message := t.emitDiffMessages(internalKey, existingInternalEntry, merged)
+			messagesToEmit = messagesToEmit.Merge(message)
+			fmt.Printf(">>>> Otherwise: %+v\n\n", messagesToEmit)
+		}
+		//////////////////////////////
 	}
+	fmt.Printf(">>>>%+v\n\n\n", messagesToEmit)
 
 	t.entries = otherTable.entries
 	t.internalEntries = otherTable.internalEntries
