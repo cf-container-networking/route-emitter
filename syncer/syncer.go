@@ -15,11 +15,13 @@ import (
 )
 
 type NatsSyncer struct {
-	natsClient   diegonats.NATSClient
-	clock        clock.Clock
-	syncInterval time.Duration
-	events       Events
-	routerStart  chan time.Duration
+	natsClient                    diegonats.NATSClient
+	clock                         clock.Clock
+	syncInterval                  time.Duration
+	events                        Events
+	routerStart                   chan time.Duration
+	internalRouterStart           chan time.Duration
+	waitForInternalRoutesGreeting bool
 
 	logger lager.Logger
 }
@@ -28,6 +30,7 @@ func NewSyncer(
 	clock clock.Clock,
 	syncInterval time.Duration,
 	natsClient diegonats.NATSClient,
+	internalRoutes bool,
 	logger lager.Logger,
 ) *NatsSyncer {
 	return &NatsSyncer{
@@ -36,13 +39,17 @@ func NewSyncer(
 		clock:        clock,
 		syncInterval: syncInterval,
 		events: Events{
-			Sync: make(chan struct{}, 1),
-			Emit: make(chan struct{}, 1),
+			Sync:         make(chan struct{}, 1),
+			Emit:         make(chan struct{}, 1),
+			InternalSync: make(chan struct{}, 1),
+			InternalEmit: make(chan struct{}, 1),
 		},
 
-		routerStart: make(chan time.Duration),
+		routerStart:         make(chan time.Duration),
+		internalRouterStart: make(chan time.Duration),
 
 		logger: logger.Session("syncer"),
+		waitForInternalRoutesGreeting: internalRoutes,
 	}
 }
 
@@ -58,6 +65,12 @@ func (s *NatsSyncer) Run(signals <-chan os.Signal, ready chan<- struct{}) error 
 		return err
 	}
 
+	if s.waitForInternalRoutesGreeting {
+		err = s.listenForServiceDiscovery(replyUuid.String())
+		if err != nil {
+			return err
+		}
+	}
 	close(ready)
 	s.logger.Info("started")
 
@@ -85,6 +98,17 @@ GREET_LOOP:
 		}
 	}
 	retryGreetingTicker.Stop()
+
+	//greet service discovery
+	if s.waitForInternalRoutesGreeting {
+		s.logger.Info("greeting-service-discovery")
+		err = s.greetServiceDiscovery(replyUuid.String())
+		if err != nil {
+			s.logger.Error("failed-to-greet-service-discovery", err)
+			return err
+		}
+		s.internalSync()
+	}
 
 	s.sync()
 
@@ -135,6 +159,10 @@ func (s *NatsSyncer) sync() {
 	s.events.Sync <- struct{}{}
 }
 
+func (s *NatsSyncer) internalSync() {
+	s.events.InternalSync <- struct{}{}
+}
+
 func (s *NatsSyncer) listenForRouter(replyUUID string) error {
 	_, err := s.natsClient.Subscribe("router.start", s.handleRouterStart)
 	if err != nil {
@@ -159,6 +187,30 @@ func (s *NatsSyncer) greetRouter(replyUUID string) error {
 	return nil
 }
 
+func (s *NatsSyncer) listenForServiceDiscovery(replyUUID string) error {
+	_, err := s.natsClient.Subscribe("service-discovery.start", s.handleServiceDiscoveryStart)
+	if err != nil {
+		return err
+	}
+
+	// sub, err := s.natsClient.Subscribe(replyUUID, s.handleServiceDiscoveryStart)
+	// if err != nil {
+	// 	return err
+	// }
+	// sub.AutoUnsubscribe(1)
+
+	return nil
+}
+
+func (s *NatsSyncer) greetServiceDiscovery(replyUUID string) error {
+	err := s.natsClient.PublishRequest("service-discovery.greet", "TODO Figure out replyUUID", []byte{})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (s *NatsSyncer) handleRouterStart(msg *nats.Msg) {
 	var response routingtable.RouterGreetingMessage
 
@@ -172,4 +224,19 @@ func (s *NatsSyncer) handleRouterStart(msg *nats.Msg) {
 
 	greetInterval := response.MinimumRegisterInterval
 	s.routerStart <- time.Duration(greetInterval) * time.Second
+}
+
+func (s *NatsSyncer) handleServiceDiscoveryStart(msg *nats.Msg) {
+	var response routingtable.RouterGreetingMessage // TODO consider changing the name of this struct - it's used by both router and service-discovery
+
+	err := json.Unmarshal(msg.Data, &response)
+	if err != nil {
+		s.logger.Error("received-invalid-service-discovery-start", err, lager.Data{
+			"payload": msg.Data,
+		})
+		return
+	}
+
+	greetInterval := response.MinimumRegisterInterval
+	s.internalRouterStart <- time.Duration(greetInterval) * time.Second
 }

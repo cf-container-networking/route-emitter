@@ -43,7 +43,10 @@ var _ = Describe("NatsSyncer", func() {
 		schedulingInfoResponse *models.DesiredLRPSchedulingInfo
 		actualResponses        []*models.ActualLRPGroup
 
-		routerStartMessages chan<- *nats.Msg
+		routerStartMessages           chan<- *nats.Msg
+		serviceDiscoveryStartMessages chan<- *nats.Msg
+
+		waitForInternalRoutesGreeting bool
 	)
 
 	BeforeEach(func() {
@@ -59,6 +62,19 @@ var _ = Describe("NatsSyncer", func() {
 		natsClient.WhenSubscribing("router.start", func(callback nats.MsgHandler) error {
 			go func() {
 				for msg := range startMessages {
+					callback(msg)
+				}
+			}()
+
+			return nil
+		})
+
+		startMessages2 := make(chan *nats.Msg)
+		serviceDiscoveryStartMessages = startMessages2
+
+		natsClient.WhenSubscribing("service-discovery.start", func(callback nats.MsgHandler) error {
+			go func() {
+				for msg := range startMessages2 {
 					callback(msg)
 				}
 			}()
@@ -94,7 +110,7 @@ var _ = Describe("NatsSyncer", func() {
 
 	JustBeforeEach(func() {
 		logger := lagertest.NewTestLogger("test")
-		syncerRunner = syncer.NewSyncer(clock, syncInterval, natsClient, logger)
+		syncerRunner = syncer.NewSyncer(clock, syncInterval, natsClient, waitForInternalRoutesGreeting, logger)
 
 		shutdown = make(chan struct{})
 
@@ -106,6 +122,7 @@ var _ = Describe("NatsSyncer", func() {
 		Eventually(process.Wait()).Should(Receive(BeNil()))
 		close(shutdown)
 		close(routerStartMessages)
+		close(serviceDiscoveryStartMessages)
 	})
 
 	Describe("getting the heartbeat interval from the router", func() {
@@ -247,6 +264,52 @@ var _ = Describe("NatsSyncer", func() {
 			It("should still be able to shutdown", func() {
 				process.Signal(os.Interrupt)
 				Eventually(process.Wait()).Should(Receive(BeNil()))
+			})
+		})
+	})
+
+	FDescribe("getting the heartbeat interval from service-discovery", func() {
+		var greetings chan *nats.Msg
+		BeforeEach(func() {
+			greetings = make(chan *nats.Msg, 3)
+			natsClient.WhenPublishing("service-discovery.greet", func(msg *nats.Msg) error {
+				greetings <- msg
+				return nil
+			})
+			waitForInternalRoutesGreeting = true
+		})
+
+		Context("when service-discovery emits a service-discovery.start", func() {
+			Context("using a one second interval", func() {
+				JustBeforeEach(func() {
+					routerStartMessages <- &nats.Msg{
+						Data: []byte(`{
+						"minimumRegisterIntervalInSeconds":1000,
+						"pruneThresholdInSeconds": 3000
+						}`),
+					}
+					serviceDiscoveryStartMessages <- &nats.Msg{
+						Data: []byte(`{
+										"minimumRegisterIntervalInSeconds":1,
+										"pruneThresholdInSeconds": 3
+										}`),
+					}
+				})
+
+				It("should emit internal routes with the frequency of the passed-in-interval", func() {
+					Eventually(syncerRunner.Events().InternalSync).Should(Receive())
+
+					clock.WaitForNWatchersAndIncrement(time.Second, 2)
+					Eventually(syncerRunner.Events().InternalEmit).Should(Receive())
+
+					// clock.WaitForNWatchersAndIncrement(time.Second, 2)
+					// Eventually(syncerRunner.Events().InternalEmit).Should(Receive())
+				})
+
+				It("should only greet service-discovery once", func() {
+					Eventually(greetings).Should(Receive())
+					Consistently(greetings, 1).ShouldNot(Receive())
+				})
 			})
 		})
 	})
